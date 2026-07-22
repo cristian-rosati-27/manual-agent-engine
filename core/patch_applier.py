@@ -7,7 +7,7 @@ import os
 import streamlit as st
 
 from core.file_manager import delete_file, read_file, write_file
-from core.version_history import HistoryEntry, PatchRecord, VersionHistory
+from core.version_history import HistoryEntry, PatchRecord, VersionHistory, snapshot_git
 
 
 def apply_single_patch(index: int) -> str | None:
@@ -117,7 +117,9 @@ def _revert_record(record: PatchRecord) -> None:
 
 
 def _commit_to_history(records: list[PatchRecord], description: str) -> None:
-    entry = HistoryEntry(description=description, patches=records)
+    workdir = st.session_state.workdir
+    commit_hash = snapshot_git(workdir, description)
+    entry = HistoryEntry(description=description, patches=records, git_commit_hash=commit_hash)
     st.session_state.version_history.commit(entry)
 
 

@@ -13,12 +13,14 @@ from ui.chat_panel import render_chat_panel
 from ui.chats_tab import render_chats_tab
 from ui.settings_tab import render_settings_tab
 from ui.workdir_tab import render_workdir_tab
+from ui.mcp_tab import render_mcp_tab
+from ui.prompts_tab import render_prompts_tab
 
 # ---------------------------------------------------------------------------
 # Page config  (must be the first Streamlit call)
 # ---------------------------------------------------------------------------
 st.set_page_config(
-    page_title="LLM Workbench",
+    page_title="Agentic Coding Studio",
     page_icon="🛠️",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -95,13 +97,17 @@ init_session()
 # Sidebar: WorkDir / Settings / Chats tabs
 # ---------------------------------------------------------------------------
 with st.sidebar:
-    tab_wd, tab_settings, tab_chats = st.tabs(
-        ["📁 WorkDir", "⚙️ Settings", "💬 Chats"]
+    tab_wd, tab_settings, tab_prompts, tab_mcp, tab_chats = st.tabs(
+        ["📁 WorkDir", "⚙️ Settings", "🧠 Prompts", "🔌 MCP", "💬 Chats"]
     )
     with tab_wd:
         render_workdir_tab()
     with tab_settings:
         render_settings_tab()
+    with tab_prompts:
+        render_prompts_tab()
+    with tab_mcp:
+        render_mcp_tab()
     with tab_chats:
         render_chats_tab()
 

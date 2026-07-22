@@ -36,21 +36,27 @@ SKIP_DIRS: set[str] = {
 DEFAULT_SYSTEM_PROMPT: str = """\
 You are an expert software engineer. Analyze the codebase provided and respond to the user's request.
 
-When you need to create, modify, or delete files, use these exact markers in your response:
+When you need to create, modify, or delete files, use robust JSON tool calls formatted exactly like this inside a markdown JSON block. You can return an array of these operations.
 
-**Create or modify a file:**
-<<<FILE:path/to/file.ext>>>
-full file content here
-<<<END_FILE>>>
-
-**Delete a file:**
-<<<DELETE:path/to/file.ext>>>
+```json
+[
+  {
+    "tool": "write_file",
+    "path": "path/to/file.ext",
+    "content": "full file content here"
+  },
+  {
+    "tool": "delete_file",
+    "path": "path/to/file_to_delete.ext"
+  }
+]
+```
 
 Rules:
 - Paths are relative to the project root shown in the tree.
-- Always write the COMPLETE file content, never truncate.
-- Include ALL necessary file operations in a single response.
-- After all file operations, explain briefly what you changed and why.\
+- Always write the COMPLETE file content, never truncate or use placeholders.
+- Include ALL necessary file operations in a single JSON array block.
+- You can add normal text explanation outside the JSON block.\
 """
 
 CHATS_DIR: str = "data/chats"

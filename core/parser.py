@@ -1,110 +1,77 @@
 # core/parser.py
 
-"""Parse LLM responses for file operation commands.
+"""Parse LLM responses for file operation commands using JSON schemas and Pydantic."""
 
-Supported syntax
-----------------
-Create / overwrite a file:
-    <<<FILE:path/to/file.ext>>>
-    content here
-    <<<END_FILE>>>
-
-Delete a file:
-    <<<DELETE:path/to/file.ext>>>
-"""
-
+import json
 import re
-from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Optional, List, Any
+from pydantic import BaseModel, Field, ValidationError
 
-
-@dataclass
-class FilePatch:
-    type: Literal["write", "delete"]
+class ToolCall(BaseModel):
+    tool: Literal["write_file", "delete_file"]
     path: str
-    content: str = ""
+    content: Optional[str] = ""
+
+class FilePatch:
+    def __init__(self, type: str, path: str, content: str = ""):
+        # map pydantic tools to old UI types
+        self.type = "write" if type == "write_file" else "delete"
+        self.path = path
+        self.content = content
 
 
-# ===========================================================================
-# Regex patterns
-# ===========================================================================
+def extract_json_arrays(text: str) -> list[str]:
+    """Find JSON arrays in the text, handling markdown fences or bare arrays."""
+    arrays = []
+    
+    # Try finding markdown fenced blocks first
+    for match in re.finditer(r"```(?:json)?\n(.*?)\n```", text, re.DOTALL):
+        arrays.append(match.group(1).strip())
+        
+    # If no fences, try finding raw JSON arrays [ ... ]
+    if not arrays:
+        for match in re.finditer(r"\[\s*\{.*?\}\s*\]", text, re.DOTALL):
+            arrays.append(match.group(0).strip())
+            
+    return arrays
 
-# Supports:
-# <<<FILE:path>>>
-# content
-# <<<END_FILE>>>
-#
-# Also supports optional markdown fences around the whole block:
-#
-# ```python
-# <<<FILE:path>>>
-# ...
-# <<<END_FILE>>>
-# ```
-#
-# which is exactly what happened in your failing test.
-
-_FILE_RE = re.compile(
-    r"(?:```[a-zA-Z0-9_-]*\n)?"
-    r"<<<FILE:([^\n>]+)>>>\n?"
-    r"(.*?)"
-    r"<<<END_FILE>>>"
-    r"(?:\n```)?",
-    re.DOTALL,
-)
-
-_DELETE_RE = re.compile(
-    r"<<<DELETE:([^\n>]+)>>>"
-)
-
-
-# ===========================================================================
-# Public API
-# ===========================================================================
 
 def parse_llm_response(response: str) -> list[FilePatch]:
-    """Return ordered FilePatch objects extracted from *response*."""
-
+    """Return ordered FilePatch objects extracted from JSON blocks in *response*."""
     patches: list[FilePatch] = []
     seen_paths: set[str] = set()
+    
+    json_strings = extract_json_arrays(response)
+    
+    # If extraction failed, try parsing the whole response as JSON just in case
+    if not json_strings:
+        json_strings = [response.strip()]
 
-    # -------------------------------------------------------------------
-    # FILE blocks
-    # -------------------------------------------------------------------
-
-    for match in _FILE_RE.finditer(response):
-        path = match.group(1).strip()
-        content = match.group(2)
-
-        if content.endswith("\n"):
-            content = content[:-1]
-
-        if path not in seen_paths:
-            patches.append(
-                FilePatch(
-                    type="write",
-                    path=path,
-                    content=content,
-                )
-            )
-
-            seen_paths.add(path)
-
-    # -------------------------------------------------------------------
-    # DELETE blocks
-    # -------------------------------------------------------------------
-
-    for match in _DELETE_RE.finditer(response):
-        path = match.group(1).strip()
-
-        if path not in seen_paths:
-            patches.append(
-                FilePatch(
-                    type="delete",
-                    path=path,
-                )
-            )
-
-            seen_paths.add(path)
+    for json_str in json_strings:
+        try:
+            data = json.loads(json_str)
+            # handle both single object and array of objects
+            if isinstance(data, dict):
+                data = [data]
+                
+            if isinstance(data, list):
+                for item in data:
+                    try:
+                        # Validate with Pydantic
+                        call = ToolCall(**item)
+                        if call.path not in seen_paths:
+                            patches.append(
+                                FilePatch(
+                                    type=call.tool,
+                                    path=call.path,
+                                    content=call.content or ""
+                                )
+                            )
+                            seen_paths.add(call.path)
+                    except ValidationError:
+                        # Ignore items that don't match our tool schema
+                        continue
+        except json.JSONDecodeError:
+            continue
 
     return patches

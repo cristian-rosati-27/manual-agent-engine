@@ -7,7 +7,7 @@ import os
 import streamlit as st
 import streamlit.components.v1 as components
 
-from config.defaults import ALL_KNOWN_EXTENSIONS, MAX_FILE_SIZE_KB
+from config.defaults import MAX_FILE_SIZE_KB, SKIP_DIRS
 from core.file_manager import file_exists
 from core.patch_applier import apply_all_patches, apply_single_patch, redo_to, undo_to
 from core.prompt_builder import build_prompt
@@ -21,7 +21,7 @@ from core.version_history import VersionHistory
 def render_workdir_tab() -> None:
     _section_workdir()
     st.divider()
-    _section_extensions()
+    _section_tree_preview()
     st.divider()
     _section_context_preview()
     st.divider()
@@ -34,26 +34,51 @@ def render_workdir_tab() -> None:
 # Section: Work Directory
 # ===========================================================================
 
+import json
+
+def _load_recent_paths() -> list[str]:
+    path = "data/recent_paths.json"
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            return []
+    return []
+
+def _save_recent_paths(paths: list[str]) -> None:
+    os.makedirs("data", exist_ok=True)
+    with open("data/recent_paths.json", "w", encoding="utf-8") as f:
+        json.dump(paths, f)
+
 def _section_workdir() -> None:
     st.markdown("#### 📁 Work Directory")
+    
+    if "recent_paths" not in st.session_state:
+        st.session_state.recent_paths = _load_recent_paths()
 
-    new_dir = st.text_input(
-        "dir",
-        value=st.session_state.workdir,
-        label_visibility="collapsed",
-        placeholder="Absolute path to project root…",
-        key="workdir_input",
-    )
+    col_dir, col_btn = st.columns([3, 1])
+    with col_dir:
+        new_dir = st.text_input(
+            "dir",
+            value=st.session_state.workdir,
+            label_visibility="collapsed",
+            placeholder="Absolute path to project root…",
+            key="workdir_input",
+        )
+    with col_btn:
+        if st.button("Choose", use_container_width=True, key="choose_dir_btn"):
+            st.toast("File picker not natively supported. Please paste the path.", icon="ℹ️")
 
-    col_set, col_build = st.columns(2)
-
-    with col_set:
-        if st.button("✅ Set & Build", use_container_width=True, key="set_workdir"):
-            _set_workdir_and_build(new_dir.strip())
-
-    with col_build:
-        if st.button("🔄 Rebuild", use_container_width=True, key="build_prompt_workdir"):
-            _set_workdir_and_build(new_dir.strip())
+    col_set = st.columns(1)[0]
+    if col_set.button("✅ Set Workspace", use_container_width=True, key="set_workdir"):
+        _set_workdir(new_dir.strip())
+        
+    if st.session_state.recent_paths:
+        selected_recent = st.selectbox("Recent Paths", ["Select a recent path..."] + st.session_state.recent_paths)
+        if selected_recent and selected_recent != "Select a recent path..." and selected_recent != st.session_state.workdir:
+            st.session_state.workdir_input = selected_recent
+            _set_workdir(selected_recent)
 
     if st.session_state.workdir and os.path.isdir(st.session_state.workdir):
         st.caption(f"✅ `{st.session_state.workdir}`")
@@ -63,7 +88,7 @@ def _section_workdir() -> None:
         st.caption("No directory set.")
 
 
-def _set_workdir_and_build(path: str) -> None:
+def _set_workdir(path: str) -> None:
     if not path:
         st.toast("Enter a path first.", icon="⚠️")
         return
@@ -71,66 +96,126 @@ def _set_workdir_and_build(path: str) -> None:
         st.toast(f"Directory not found: {path}", icon="⚠️")
         return
     st.session_state.workdir = path
-    _build_and_inject_prompt()
+    
+    if path not in st.session_state.recent_paths:
+        st.session_state.recent_paths.insert(0, path)
+        if len(st.session_state.recent_paths) > 10:
+            st.session_state.recent_paths.pop()
+        _save_recent_paths(st.session_state.recent_paths)
+        
+    # Reset tree selection on new dir
+    st.session_state.tree_selection = {}
+    st.session_state.pop("cached_prompt", None)
+    st.rerun()
 
 
 # ===========================================================================
-# Section: Extensions
+# Section: Tree Preview
 # ===========================================================================
 
-def _section_extensions() -> None:
-    st.markdown("#### 🔍 File Extensions")
+def _section_tree_preview() -> None:
+    st.markdown("#### 🌳 Tree Preview")
+    
+    if not st.session_state.workdir or not os.path.isdir(st.session_state.workdir):
+        st.caption("Set a valid working directory to view the tree.")
+        return
+        
+    if "tree_selection" not in st.session_state:
+        st.session_state.tree_selection = {}
+        
+    if "expanded_nodes" not in st.session_state:
+        st.session_state.expanded_nodes = {st.session_state.workdir}
+        
+    def get_all_children(root_path):
+        children = []
+        try:
+            for dirpath, dirnames, filenames in os.walk(root_path):
+                dirnames[:] = [d for d in dirnames if not d.startswith(".") and d not in SKIP_DIRS]
+                for f in filenames:
+                    if not f.startswith("."):
+                        children.append(os.path.join(dirpath, f))
+                for d in dirnames:
+                    children.append(os.path.join(dirpath, d))
+        except:
+            pass
+        return children
 
-    selected = st.multiselect(
-        "extensions",
-        options=ALL_KNOWN_EXTENSIONS,
-        default=st.session_state.extensions,
-        label_visibility="collapsed",
-        key="ext_multiselect",
-    )
+    def toggle_node(node_path, is_dir):
+        current_state = st.session_state.tree_selection.get(node_path, True)
+        new_state = not current_state
+        st.session_state.tree_selection[node_path] = new_state
+        if is_dir:
+            for child in get_all_children(node_path):
+                st.session_state.tree_selection[child] = new_state
 
-    if selected != st.session_state.extensions:
-        st.session_state.extensions = selected
-        st.session_state.pop("cached_prompt", None)
+    def render_tree(current_path, level=0):
+        try:
+            entries = sorted(list(os.scandir(current_path)), key=lambda e: (not e.is_dir(), e.name.lower()))
+        except PermissionError:
+            return
 
-    col_custom, col_add = st.columns([3, 1])
-
-    with col_custom:
-        custom = st.text_input(
-            "custom ext",
-            placeholder="e.g. .vue",
-            label_visibility="collapsed",
-            key="custom_ext_input",
-        )
-
-    with col_add:
-        if st.button("Add", use_container_width=True, key="add_custom_ext"):
-            if custom:
-                ext = custom if custom.startswith(".") else f".{custom}"
-                if ext not in st.session_state.extensions:
-                    st.session_state.extensions.append(ext)
-                    st.session_state.pop("cached_prompt", None)
+        for entry in entries:
+            if entry.name.startswith(".") or entry.name in SKIP_DIRS:
+                continue
+                
+            is_dir = entry.is_dir()
+            icon = "📁" if is_dir else "📄"
+            
+            node_state = st.session_state.tree_selection.get(entry.path, True)
+            
+            indent_weight = max(level * 0.7, 0.01)
+            cols = st.columns([indent_weight, 1, 1, 10])
+            
+            with cols[1]:
+                if is_dir:
+                    is_expanded = entry.path in st.session_state.expanded_nodes
+                    btn_label = "🔽" if is_expanded else "▶️"
+                    if st.button(btn_label, key=f"exp_{entry.path}", help="Expand/Collapse"):
+                        if is_expanded:
+                            st.session_state.expanded_nodes.discard(entry.path)
+                        else:
+                            st.session_state.expanded_nodes.add(entry.path)
+                        st.rerun()
+            with cols[2]:
+                changed = st.checkbox("", value=node_state, key=f"chk_{entry.path}", label_visibility="collapsed")
+                if changed != node_state:
+                    toggle_node(entry.path, is_dir)
                     st.rerun()
+            with cols[3]:
+                st.markdown(f"{icon} {entry.name}")
+                
+            if is_dir and entry.path in st.session_state.expanded_nodes:
+                render_tree(entry.path, level + 1)
+                
+    with st.container(height=400):
+        render_tree(st.session_state.workdir)
 
 
 # ===========================================================================
-# Section: Context Preview
+# Section: Context Preview (Injection)
 # ===========================================================================
 
 def _section_context_preview() -> None:
-    st.markdown("#### 📋 Context Preview")
+    st.markdown("#### 💉 Context Injection")
+
+    if st.button("🚀 Inject Context", use_container_width=True, type="primary"):
+        _build_and_inject_prompt()
 
     prompt = st.session_state.get("cached_prompt", "")
 
     if not prompt:
-        st.caption("Prompt not built yet. Click **✅ Set & Build** or **🔄 Rebuild** above.")
+        st.caption("Context not injected yet.")
         return
 
+    # Assuming a max context size of 1,000,000 tokens for demonstration (e.g. Gemini 1.5 Pro)
+    max_tokens = 1000000
     token_estimate = len(prompt) // 4
-    st.caption(f"~{token_estimate:,} tokens")
+    percentage = min(token_estimate / max_tokens, 1.0)
+    
+    st.markdown(f"**Context Size:** `{token_estimate:,} tokens` ({percentage*100:.1f}%)")
+    st.progress(percentage)
 
     # Copy button via components.html so it's never sanitised by Streamlit
-    # We pass the text through a data attribute to avoid JS string escaping issues
     components.html(
         f"""
         <textarea id="__prompt_data" style="display:none">{_html_escape(prompt)}</textarea>
@@ -178,20 +263,24 @@ def _html_escape(text: str) -> str:
 
 
 # ===========================================================================
-# Prompt builder
+# Prompt builder wrapper
 # ===========================================================================
 
 def _build_and_inject_prompt() -> None:
-    with st.spinner("Building prompt…"):
+    if not st.session_state.workdir or not os.path.isdir(st.session_state.workdir):
+        st.error("Please set a valid work directory first.")
+        return
+        
+    with st.spinner("Injecting context…"):
         prompt = build_prompt(
             root=st.session_state.workdir,
-            extensions=st.session_state.extensions,
-            system_prompt=st.session_state.system_prompt,
+            selected_paths=st.session_state.get("tree_selection", {}),
+            system_prompt=st.session_state.get("system_prompt", ""),
             max_kb=st.session_state.get("max_file_size_kb", MAX_FILE_SIZE_KB),
         )
     st.session_state.cached_prompt = prompt
     st.session_state["prefill_user_message"] = prompt
-    st.toast("Prompt built and pre-filled in chat!", icon="📋")
+    st.toast("Context injected and pre-filled in chat!", icon="📋")
 
 
 # ===========================================================================
@@ -199,12 +288,12 @@ def _build_and_inject_prompt() -> None:
 # ===========================================================================
 
 def _section_pending_patches() -> None:
-    st.markdown("#### ⏳ Pending Patches")
+    st.markdown("#### ⏳ Tool Changes")
 
     patches: list[dict] = st.session_state.pending_patches
 
     if not patches:
-        st.caption("No pending patches.")
+        st.caption("No pending changes.")
         return
 
     col_all1, col_all2, col_count = st.columns([2, 2, 2])
@@ -294,8 +383,6 @@ def _section_version_history() -> None:
             undo_to(-1)
             st.rerun()
 
-    # Render: UNDO-before-first, then entries interleaved with UNDO/REDO buttons
-    # Slot -1↔0: button to undo the very first commit (go back to clean state)
     _render_between_button(-1, vh)
 
     for i, entry in enumerate(vh.entries):
@@ -308,11 +395,7 @@ def _section_version_history() -> None:
 
 
 def _render_between_button(above_index: int, vh: VersionHistory) -> None:
-    """Render UNDO / REDO / disabled button between slot above_index and above_index+1.
-
-    above_index == -1  means the slot before the first entry (head → -1).
-    """
-    below_index   = above_index + 1   # the entry just below this button
+    below_index   = above_index + 1
     below_applied = vh.is_applied(below_index)
     above_is_head = above_index == vh.head
 
@@ -320,29 +403,12 @@ def _render_between_button(above_index: int, vh: VersionHistory) -> None:
 
     with col_btn:
         if below_applied:
-            # Clicking undoes everything from head down to below_index,
-            # leaving head == above_index
-            if st.button(
-                "↩ UNDO",
-                key=f"undo_btn_{above_index + 1}",
-                use_container_width=True,
-            ):
+            if st.button("↩ Restore", key=f"undo_btn_{above_index + 1}", use_container_width=True):
                 undo_to(above_index)
                 st.rerun()
-
         elif above_is_head:
-            if st.button(
-                "↪ REDO",
-                key=f"redo_btn_{above_index + 1}",
-                use_container_width=True,
-            ):
+            if st.button("↪ REDO", key=f"redo_btn_{above_index + 1}", use_container_width=True):
                 redo_to(below_index)
                 st.rerun()
-
         else:
-            st.button(
-                "· · ·",
-                key=f"gap_btn_{above_index + 1}",
-                use_container_width=True,
-                disabled=True,
-            )
+            st.button("· · ·", key=f"gap_btn_{above_index + 1}", use_container_width=True, disabled=True)

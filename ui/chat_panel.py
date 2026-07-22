@@ -7,6 +7,7 @@ import streamlit.components.v1 as components
 
 from core.parser import parse_llm_response
 from state.session import save_chat
+from config.defaults import DEFAULT_SYSTEM_PROMPT
 
 
 # ===========================================================================
@@ -51,9 +52,10 @@ def _section_header() -> None:
         )
         if name != st.session_state.current_chat_name:
             st.session_state.current_chat_name = name
+            save_chat()
 
     with col_clear:
-        if st.button("🗑️", use_container_width=True, key="clear_chat_btn"):
+        if st.button("🗑️ Clear", use_container_width=True, key="clear_chat_btn"):
             st.session_state.messages = []
             st.session_state.pending_patches = []
             st.rerun()
@@ -70,19 +72,80 @@ def _section_messages() -> None:
         st.info(
             "No conversation yet.\n\n"
             "**Workflow**\n"
-            "1. Set the work directory and click **✅ Set & Build**.\n"
+            "1. Set the work directory and click **🚀 Inject Context**.\n"
             "2. Your message is pre-filled — add your request and send.\n"
             "3. Copy the full message, paste it to your LLM, paste the response back.\n"
-            "4. Patches are extracted automatically → review in **Pending Patches**."
+            "4. Patches are extracted automatically → review in **Tool Changes**."
         )
         return
 
-    for i, msg in enumerate(messages):
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+    if "edit_message_index" not in st.session_state:
+        st.session_state.edit_message_index = None
 
-            if msg["role"] == "user":
-                _copy_button(msg["content"], uid=f"user_{i}")
+    for i, msg in enumerate(messages):
+        role = msg["role"]
+        
+        with st.chat_message(role):
+            if st.session_state.edit_message_index == i:
+                new_content = st.text_area("Edit Message", value=msg["content"], height=200, key=f"edit_area_{i}")
+                col_save, col_cancel = st.columns(2)
+                with col_save:
+                    if st.button("Save", key=f"save_edit_{i}"):
+                        st.session_state.messages[i]["content"] = new_content
+                        st.session_state.messages = st.session_state.messages[:i+1]
+                        st.session_state.edit_message_index = None
+                        save_chat()
+                        st.rerun()
+                with col_cancel:
+                    if st.button("Cancel", key=f"cancel_edit_{i}"):
+                        st.session_state.edit_message_index = None
+                        st.rerun()
+            else:
+                st.markdown(msg["content"])
+                
+                if "attachments" in msg and msg["attachments"]:
+                    for att in msg["attachments"]:
+                        st.caption(f"📎 {att['name']} ({att['size']} bytes)")
+                
+                msg_tokens = len(msg["content"]) // 4
+                
+                # Format text for copy
+                copy_text = msg["content"]
+                
+                # If first message, prepend all prompts
+                if i == 0 and role == "user":
+                    sys_prompt = st.session_state.get("system_prompt", DEFAULT_SYSTEM_PROMPT)
+                    tool_prompt = st.session_state.get("tool_prompt_textarea", "")
+                    inj_prompt = st.session_state.get("injection_prompt_textarea", "")
+                    caveman = st.session_state.get("caveman_mode", False)
+                    skills = st.session_state.get("skills", [])
+                    
+                    full_prompt_parts = []
+                    if sys_prompt: full_prompt_parts.append(f"System Prompt:\n{sys_prompt}")
+                    if tool_prompt: full_prompt_parts.append(f"Tool Guidelines:\n{tool_prompt}")
+                    
+                    for skill in skills:
+                        full_prompt_parts.append(f"Skill: {skill['name']}\n{skill['content']}")
+                        
+                    if inj_prompt: full_prompt_parts.append(f"Injection Prompt:\n{inj_prompt}")
+                    if caveman: full_prompt_parts.append("Caveman Mode: Speak like a caveman, be extremely concise, omit pleasantries, use as few words as possible to save tokens.")
+                    
+                    if full_prompt_parts:
+                        prompts_combined = "\n\n".join(full_prompt_parts)
+                        copy_text = f"{prompts_combined}\n\n---\n\n{copy_text}"
+                
+                col1, col2, col3, col_space = st.columns([1, 1, 3, 9])
+                with col1:
+                    _copy_button(copy_text, uid=f"msg_{i}")
+                with col2:
+                    if st.button("✏️", key=f"edit_btn_{i}", help="Edit message"):
+                        st.session_state.edit_message_index = i
+                        st.rerun()
+                with col3:
+                    st.caption(f"_{msg_tokens:,} tokens_")
+
+    total_tokens = sum(len(m["content"]) // 4 for m in messages)
+    st.caption(f"**Total conversation:** ~{total_tokens:,} tokens")
 
 
 # ===========================================================================
@@ -93,25 +156,39 @@ def _copy_button(text: str, uid: str) -> None:
     safe = _html_escape(text)
     components.html(
         f"""
+        <style>
+        body {{
+            margin: 0;
+            padding: 0;
+            display: flex;
+            align-items: center;
+            height: 100%;
+        }}
+        button {{
+            padding: 4px 8px;
+            background: transparent;
+            color: #888;
+            border: 1px solid #444;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 1rem;
+            margin-top: 10px;
+        }}
+        </style>
         <textarea id="d_{uid}" style="display:none">{safe}</textarea>
         <button id="b_{uid}" onclick="
             var t = document.getElementById('d_{uid}').value;
             navigator.clipboard.writeText(t)
               .then(function() {{
-                document.getElementById('b_{uid}').innerText = '✅ Copied!';
+                document.getElementById('b_{uid}').innerText = '✅';
                 setTimeout(function() {{
-                  document.getElementById('b_{uid}').innerText = '📋 Copy message';
+                  document.getElementById('b_{uid}').innerText = '📋';
                 }}, 2000);
               }})
               .catch(function(e) {{ alert('Copy failed: ' + e); }});
-        " style="
-            padding:2px 10px;
-            background:transparent; color:#888;
-            border:1px solid #444; border-radius:4px;
-            cursor:pointer; font-size:0.75rem;
-        ">📋 Copy message</button>
+        ">📋</button>
         """,
-        height=32,
+        height=45,
     )
 
 
@@ -130,6 +207,19 @@ def _html_escape(text: str) -> str:
 # ===========================================================================
 
 def _section_turn_input() -> None:
+    uploaded_files = st.file_uploader("Attach files", accept_multiple_files=True, key="file_uploader")
+    attachments = []
+    if uploaded_files:
+        for f in uploaded_files:
+            size_mb = f.size / (1024 * 1024)
+            attachments.append({"name": f.name, "size": f.size})
+            if size_mb > 100:
+                st.warning(f"This file is {size_mb:.1f} MB. It may consume a large amount of context.")
+            if f.name.endswith(('.png', '.jpg', '.jpeg', '.gif', '.zip', '.tar', '.gz', '.pdf')):
+                st.info(f"Binary file detected ({f.name}). It won't be injected into context unless explicitly requested.")
+    
+    st.session_state.current_attachments = attachments
+
     messages: list[dict] = st.session_state.messages
     expecting_assistant = len(messages) > 0 and messages[-1]["role"] == "user"
 
@@ -149,8 +239,6 @@ def _user_input() -> None:
     if prefill:
         st.markdown("**👤 User Message** — edit then send")
 
-        # Key includes a hash of the prefill so it re-mounts when a new
-        # prompt is injected (avoids Streamlit ignoring the new value)
         area_key = f"prefill_textarea_{abs(hash(prefill)) % 10_000}"
 
         edited = st.text_area(
@@ -165,7 +253,10 @@ def _user_input() -> None:
         with col_send:
             if st.button("➤ Send", type="primary", use_container_width=True, key="send_prefill_btn"):
                 if edited.strip():
-                    st.session_state.messages.append({"role": "user", "content": edited.strip()})
+                    msg = {"role": "user", "content": edited.strip()}
+                    if st.session_state.current_attachments:
+                        msg["attachments"] = st.session_state.current_attachments
+                    st.session_state.messages.append(msg)
                     st.session_state.pop("prefill_user_message", None)
                     save_chat()
                     st.rerun()
@@ -174,10 +265,12 @@ def _user_input() -> None:
                 st.session_state.pop("prefill_user_message", None)
                 st.rerun()
     else:
-        # st.chat_input: Enter sends, Shift+Enter = newline — native browser behaviour
         prompt = st.chat_input("Write your message…")
         if prompt and prompt.strip():
-            st.session_state.messages.append({"role": "user", "content": prompt.strip()})
+            msg = {"role": "user", "content": prompt.strip()}
+            if st.session_state.current_attachments:
+                msg["attachments"] = st.session_state.current_attachments
+            st.session_state.messages.append(msg)
             save_chat()
             st.rerun()
 
@@ -192,8 +285,13 @@ def _assistant_input() -> None:
 
     if response and response.strip():
         clean = response.strip()
-        st.session_state.messages.append({"role": "assistant", "content": clean})
+        msg = {"role": "assistant", "content": clean}
+        if st.session_state.current_attachments:
+            msg["attachments"] = st.session_state.current_attachments
+        st.session_state.messages.append(msg)
+        
         _extract_patches(clean)
+            
         save_chat()
         st.rerun()
 

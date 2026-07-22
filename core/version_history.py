@@ -1,27 +1,22 @@
-"""Version history with linear undo / redo.
+"""Version history with linear undo / redo, backed by Git snapshots.
 
 Model
 -----
 * ``entries``  – ordered list of committed HistoryEntry objects (oldest first).
 * ``head``     – index of the last *applied* entry; -1 means nothing applied.
-
-Invariant: entries[0..head] are applied to disk; entries[head+1..] have been
-undone and can be re-applied with redo.
-
-Undo to index *i*: revert entries from ``head`` down to ``i+1``, set head = i.
-Redo to index *i*: apply entries from ``head+1`` up to ``i``, set head = i.
 """
 
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
+import os
+import git
 
 
 @dataclass
 class PatchRecord:
     """Atomic record of one file operation, including enough info to revert."""
-
     type: str             # "write" | "delete"
     path: str             # absolute path on disk
     new_content: str | None = None   # content written  (write ops)
@@ -36,6 +31,7 @@ class HistoryEntry:
     )
     description: str = ""
     patches: list[PatchRecord] = field(default_factory=list)
+    git_commit_hash: str | None = None  # Stores the Git commit hash for this snapshot
 
 
 class VersionHistory:
@@ -43,19 +39,11 @@ class VersionHistory:
         self.entries: list[HistoryEntry] = []
         self.head: int = -1
 
-    # ------------------------------------------------------------------
-    # Mutation helpers (do not touch the filesystem)
-    # ------------------------------------------------------------------
-
     def commit(self, entry: HistoryEntry) -> None:
         """Append *entry* as a new commit, discarding any redo tail."""
         self.entries = self.entries[: self.head + 1]
         self.entries.append(entry)
         self.head = len(self.entries) - 1
-
-    # ------------------------------------------------------------------
-    # Query helpers
-    # ------------------------------------------------------------------
 
     @property
     def can_undo(self) -> bool:
@@ -68,10 +56,6 @@ class VersionHistory:
     def is_applied(self, index: int) -> bool:
         return index <= self.head
 
-    # ------------------------------------------------------------------
-    # Serialisation
-    # ------------------------------------------------------------------
-
     def to_dict(self) -> dict[str, Any]:
         return {
             "head": self.head,
@@ -80,6 +64,7 @@ class VersionHistory:
                     "id": e.id,
                     "timestamp": e.timestamp,
                     "description": e.description,
+                    "git_commit_hash": e.git_commit_hash,
                     "patches": [
                         {
                             "type": p.type,
@@ -103,6 +88,7 @@ class VersionHistory:
                 id=raw["id"],
                 timestamp=raw["timestamp"],
                 description=raw["description"],
+                git_commit_hash=raw.get("git_commit_hash"),
                 patches=[
                     PatchRecord(
                         type=p["type"],
@@ -115,3 +101,19 @@ class VersionHistory:
             )
             vh.entries.append(entry)
         return vh
+
+
+def snapshot_git(workdir: str, description: str) -> str | None:
+    """Create a Git commit in the workdir. Returns the commit hash or None."""
+    try:
+        repo = git.Repo.init(workdir)
+        repo.git.add(A=True)
+        # Avoid empty commits
+        if repo.is_dirty() or repo.untracked_files:
+            commit = repo.index.commit(description)
+            return commit.hexsha
+        else:
+            # If nothing changed but we still want a snapshot, we might return head
+            return repo.head.commit.hexsha if repo.heads else None
+    except Exception:
+        return None
